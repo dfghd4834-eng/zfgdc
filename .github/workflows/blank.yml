@@ -1,0 +1,629 @@
+
+name: Build Smooth Player APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate Android project
+        shell: bash
+        run: |
+          mkdir -p app/src/main/java/com/moulay/smoothplayer
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(
+                  RepositoriesMode.FAIL_ON_PROJECT_REPOS
+              )
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "SmoothPlayer"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.moulay.smoothplayer"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.moulay.smoothplayer"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.media3:media3-exoplayer:1.5.1")
+              implementation("androidx.media3:media3-exoplayer-hls:1.5.1")
+              implementation("androidx.media3:media3-ui:1.5.1")
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET"/>
+
+              <application
+                  android:label="سلاسة"
+                  android:theme="@android:style/Theme.Material.NoActionBar"
+                  android:supportsRtl="true"
+                  android:usesCleartextTraffic="false"
+                  android:hardwareAccelerated="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:supportsPictureInPicture="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/moulay/smoothplayer/MainActivity.kt <<'EOF'
+          package com.moulay.smoothplayer
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.app.PictureInPictureParams
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.OpenableColumns
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.*
+          import androidx.media3.common.C
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.MimeTypes
+          import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.exoplayer.DefaultLoadControl
+          import androidx.media3.ui.PlayerView
+          import java.security.MessageDigest
+
+          class MainActivity : Activity() {
+
+              private lateinit var player: ExoPlayer
+              private lateinit var videoView: PlayerView
+              private lateinit var status: TextView
+              private lateinit var cover: TextView
+              private lateinit var controls: LinearLayout
+
+              private var videoUri: Uri? = null
+              private var subtitleUri: Uri? = null
+              private var subtitleMime = MimeTypes.APPLICATION_SUBRIP
+
+              private var coverEnabled = true
+              private var smoothMode = true
+
+              private val skipRanges =
+                  mutableListOf<Pair<Long, Long>>()
+
+              private val coverRanges =
+                  mutableListOf<Pair<Long, Long>>()
+
+              private val handler = Handler(Looper.getMainLooper())
+
+              private fun dp(value: Int): Int =
+                  (value * resources.displayMetrics.density).toInt()
+
+              private fun glass(): GradientDrawable {
+                  return GradientDrawable().apply {
+                      setColor(Color.argb(170, 46, 61, 89))
+                      cornerRadius = dp(19).toFloat()
+                      setStroke(
+                          dp(1),
+                          Color.argb(115, 225, 235, 255)
+                      )
+                  }
+              }
+
+              private fun createPlayer() {
+                  val loadControl =
+                      DefaultLoadControl.Builder()
+                          .setBufferDurationsMs(
+                              15000,
+                              60000,
+                              1500,
+                              3000
+                          )
+                          .build()
+
+                  player = ExoPlayer.Builder(this)
+                      .setLoadControl(loadControl)
+                      .build()
+
+                  player.setPlaybackSpeed(1f)
+              }
+
+              private val checker = object : Runnable {
+                  override fun run() {
+                      if (::player.isInitialized) {
+                          val time = player.currentPosition
+
+                          if (player.isPlaying) {
+                              skipRanges.firstOrNull {
+                                  time >= it.first &&
+                                  time < it.second
+                              }?.let {
+                                  player.seekTo(it.second)
+                              }
+                          }
+
+                          if (::cover.isInitialized) {
+                              cover.visibility =
+                                  if (
+                                      coverEnabled &&
+                                      coverRanges.any {
+                                          time >= it.first &&
+                                          time < it.second
+                                      }
+                                  ) View.VISIBLE
+                                  else View.GONE
+                          }
+                      }
+
+                      handler.postDelayed(this, 250)
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  window.statusBarColor =
+                      Color.rgb(9, 14, 26)
+
+                  window.navigationBarColor =
+                      Color.rgb(9, 14, 26)
+
+                  createPlayer()
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(
+                          dp(12), dp(16),
+                          dp(12), dp(8)
+                      )
+                      setBackgroundColor(
+                          Color.rgb(9, 14, 26)
+                      )
+                  }
+
+                  val title = TextView(this).apply {
+                      text = "✦ سلاسة"
+                      textSize = 29f
+                      typeface = Typeface.DEFAULT_BOLD
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                  }
+
+                  root.addView(title)
+
+                  status = TextView(this).apply {
+                      text = "مشغل فيديو عالي السلاسة"
+                      textSize = 13f
+                      gravity = Gravity.CENTER
+                      setTextColor(
+                          Color.rgb(180, 205, 235)
+                      )
+                      setPadding(
+                          0, dp(7), 0, dp(12)
+                      )
+                  }
+
+                  root.addView(status)
+
+                  val frame = FrameLayout(this)
+
+                  videoView = PlayerView(this).apply {
+                      player = this@MainActivity.player
+                      useController = true
+                      keepScreenOn = true
+                      setBackgroundColor(Color.BLACK)
+                  }
+
+                  frame.addView(
+                      videoView,
+                      FrameLayout.LayoutParams(-1, -1)
+                  )
+
+                  cover = TextView(this).apply {
+                      text = "تم حجب هذا المشهد"
+                      textSize = 22f
+                      gravity = Gravity.CENTER
+                      setTextColor(Color.WHITE)
+                      setBackgroundColor(
+                          Color.rgb(12, 18, 31)
+                      )
+                      visibility = View.GONE
+                  }
+
+                  frame.addView(
+                      cover,
+                      FrameLayout.LayoutParams(-1, -1)
+                  )
+
+                  root.addView(
+                      frame,
+                      LinearLayout.LayoutParams(
+                          -1, 0, 1f
+                      )
+                  )
+
+                  val scroll = ScrollView(this)
+
+                  controls = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                  }
+
+                  scroll.addView(controls)
+
+                  root.addView(
+                      scroll,
+                      LinearLayout.LayoutParams(
+                          -1, dp(300)
+                      )
+                  )
+
+                  addButton("📁 فتح فيديو من الجوال") {
+                      pickFile(100, "video/*")
+                  }
+
+                  addButton("🌐 تشغيل رابط HTTPS") {
+                      showInput(
+                          "رابط الفيديو",
+                          "https://"
+                      ) { text ->
+                          val uri = Uri.parse(text)
+
+                          if (
+                              uri.scheme == "https" &&
+                              !uri.host.isNullOrBlank()
+                          ) {
+                              videoUri = uri
+                              subtitleUri = null
+                              loadRanges()
+                              playVideo(0L)
+                          } else {
+                              status.text = "الرابط غير صالح"
+                          }
+                      }
+                  }
+
+                  addButton("📝 إضافة ترجمة SRT / VTT") {
+                      pickFile(101, "*/*")
+                  }
+
+                  addButton("⚡ وضع التشغيل السلس") {
+                      smoothMode = !smoothMode
+
+                      if (smoothMode) {
+                          status.text = "التخزين المؤقت الموسع مفعل"
+                      } else {
+                          status.text = "التشغيل العادي"
+                      }
+
+                      val position = player.currentPosition
+                      val wasPlaying = player.playWhenReady
+
+                      val old = player
+                      old.release()
+
+                      val buffer =
+                          if (smoothMode) {
+                              DefaultLoadControl.Builder()
+                                  .setBufferDurationsMs(
+                                      15000, 60000,
+                                      1500, 3000
+                                  )
+                                  .build()
+                          } else {
+                              DefaultLoadControl.Builder()
+                                  .build()
+                          }
+
+                      player = ExoPlayer.Builder(this)
+                          .setLoadControl(buffer)
+                          .build()
+
+                      videoView.player = player
+                      playVideo(position)
+                      player.playWhenReady = wasPlaying
+                  }
+
+                  addButton("🛡️ تخطي مشهد غير مناسب") {
+                      addRange(skipRanges, "التخطي")
+                  }
+
+                  addButton("🙈 حجب مشهد غير مناسب") {
+                      addRange(coverRanges, "الحجب")
+                  }
+
+                  addButton("👁️ تشغيل / إيقاف الحجب") {
+                      coverEnabled = !coverEnabled
+
+                      status.text =
+                          if (coverEnabled)
+                              "الحجب مفعل"
+                          else
+                              "الحجب متوقف"
+                  }
+
+                  addButton("🗑️ حذف فترات الحجب والتخطي") {
+                      skipRanges.clear()
+                      coverRanges.clear()
+                      saveRanges()
+                      cover.visibility = View.GONE
+                      status.text = "تم حذف الفترات"
+                  }
+
+                  addButton("⛶ ملء الشاشة") {
+                      @Suppress("DEPRECATION")
+                      window.decorView.systemUiVisibility =
+                          View.SYSTEM_UI_FLAG_FULLSCREEN or
+                          View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                          View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                  }
+
+                  addButton("▣ صورة داخل صورة") {
+                      if (Build.VERSION.SDK_INT >= 26) {
+                          try {
+                              enterPictureInPictureMode(
+                                  PictureInPictureParams
+                                      .Builder()
+                                      .build()
+                              )
+                          } catch (e: Exception) {
+                              status.text = "الميزة غير متاحة"
+                          }
+                      }
+                  }
+
+                  setContentView(root)
+                  handler.post(checker)
+              }
+
+              private fun addButton(
+                  label: String,
+                  action: () -> Unit
+              ) {
+                  val button = TextView(this).apply {
+                      text = label
+                      textSize = 15f
+                      gravity = Gravity.CENTER
+                      setTextColor(Color.WHITE)
+                      background = glass()
+                      setOnClickListener { action() }
+                  }
+
+                  controls.addView(
+                      button,
+                      LinearLayout.LayoutParams(
+                          -1, dp(50)
+                      ).apply {
+                          bottomMargin = dp(8)
+                      }
+                  )
+              }
+
+              private fun pickFile(
+                  code: Int,
+                  mime: String
+              ) {
+                  val intent =
+                      Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                          addCategory(
+                              Intent.CATEGORY_OPENABLE
+                          )
+                          type = mime
+                      }
+
+                  startActivityForResult(intent, code)
+              }
+
+              @Deprecated("Legacy activity result")
+              override fun onActivityResult(
+                  requestCode: Int,
+                  resultCode: Int,
+                  data: Intent?
+              ) {
+                  super.onActivityResult(
+                      requestCode,
+                      resultCode,
+                      data
+                  )
+
+                  if (resultCode != RESULT_OK) return
+
+                  val uri = data?.data ?: return
+
+                  if (requestCode == 100) {
+                      videoUri = uri
+                      subtitleUri = null
+                      loadRanges()
+                      playVideo(0L)
+                  }
+
+                  if (
+                      requestCode == 101 &&
+                      videoUri != null
+                  ) {
+                      subtitleUri = uri
+
+                      val name = contentResolver.query(
+                          uri,
+                          arrayOf(
+                              OpenableColumns.DISPLAY_NAME
+                          ),
+                          null, null, null
+                      )?.use { cursor ->
+                          if (cursor.moveToFirst()) {
+                              cursor.getString(0)
+                          } else null
+                      } ?: uri.lastPathSegment.orEmpty()
+
+                      subtitleMime =
+                          if (
+                              name.lowercase()
+                                  .endsWith(".vtt")
+                          ) {
+                              MimeTypes.TEXT_VTT
+                          } else {
+                              MimeTypes.APPLICATION_SUBRIP
+                          }
+
+                      playVideo(
+                          player.currentPosition
+                              .coerceAtLeast(0L)
+                      )
+                  }
+              }
+
+              private fun playVideo(position: Long) {
+                  val uri = videoUri ?: return
+
+                  val builder =
+                      MediaItem.Builder().setUri(uri)
+
+                  if (
+                      uri.toString()
+                          .substringBefore("?")
+                          .endsWith(".m3u8", true)
+                  ) {
+                      builder.setMimeType(
+                          MimeTypes.APPLICATION_M3U8
+                      )
+                  }
+
+                  subtitleUri?.let { sub ->
+                      val config =
+                          MediaItem.SubtitleConfiguration
+                              .Builder(sub)
+                              .setMimeType(subtitleMime)
+                              .setLanguage("ar")
+                              .setSelectionFlags(
+                                  C.SELECTION_FLAG_DEFAULT
+                              )
+                              .build()
+
+                      builder.setSubtitleConfigurations(
+                          listOf(config)
+                      )
+                  }
+
+                  player.setMediaItem(builder.build())
+                  player.prepare()
+                  player.seekTo(position)
+                  player.play()
+
+               # This is a basic workflow to help you get started with Actions
+
+name: CI
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v4
+
+      # Runs a single command using the runners shell
+      - name: Run a one-line script
+        run: echo Hello, world!
+
+      # Runs a set of commands using the runners shell
+      - name: Run a multi-line script
+        run: |
+          echo Add other actions to build,
+          echo test, and deploy your project.
